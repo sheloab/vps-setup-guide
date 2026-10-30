@@ -16,7 +16,7 @@ out or silently undo your firewall rules.
 | Order | Repo | What you get | Required? |
 |:---:|---|---|---|
 | **1** | [hardening-script](https://github.com/sheloab/hardening-script) | Admin user, locked-down SSH, firewall (UFW), fail2ban, kernel hardening, NTP, logging | **Yes — always first** |
-| **2** | [hardening-nginx-script](https://github.com/sheloab/hardening-nginx-script) | nginx with security headers, modern TLS, rate limits, safe rollback | If you serve anything on the web |
+| **2** | [hardening-nginx-script](https://github.com/sheloab/hardening-nginx-script) | nginx with security headers, modern TLS, rate limits, bot/scanner blocker with fail2ban bans, safe rollback | If you serve anything on the web |
 | **3** | [xfce-remote-desktop-setup](https://github.com/sheloab/xfce-remote-desktop-setup) | XFCE desktop + xrdp (RDP, port 3389) | If you want a graphical desktop |
 | (3b) | Apache Guacamole in Docker — *your own stack, not in this series* | The desktop in a browser tab, behind nginx | Optional |
 | **4** | [telegram-vps-status-bot](https://github.com/sheloab/telegram-vps-status-bot) | Status, bans, sessions and alerts in Telegram | Recommended, last |
@@ -24,7 +24,7 @@ out or silently undo your firewall rules.
 
 ```mermaid
 flowchart LR
-    A["1 · hardening-script<br/>user, SSH, UFW, fail2ban"] --> B["2 · hardening-nginx-script<br/>nginx + TLS + headers"]
+    A["1 · hardening-script<br/>user, SSH, UFW, fail2ban"] --> B["2 · hardening-nginx-script<br/>nginx + TLS + headers + bot blocker"]
     B --> C["3 · xfce-remote-desktop-setup<br/>XFCE + xrdp"]
     C -.optional.-> G["3b · Guacamole (Docker)<br/>browser desktop"]
     C --> D["4 · telegram-vps-status-bot<br/>monitoring + alerts"]
@@ -75,6 +75,7 @@ while any `CHANGE_ME_*` value is left:
 | `NEW_HOSTNAME` | `CHANGE_ME_HOSTNAME` | Server name |
 | `ALERT_EMAIL` | `CHANGE_ME_ALERT_EMAIL` | Where fail2ban sends notices |
 | `SSH_ALLOWED_IPS` | `CHANGE_ME_YOUR_CURRENT_IP` | **Your** IP(s), space-separated. Only these can reach SSH afterwards |
+| `TRUSTED_IPS` | same as `SSH_ALLOWED_IPS` | IPs fail2ban never bans. Set `TRUSTED_IPS=""` to whitelist nobody (e.g. your IP changes often) |
 | `NEW_USER_SSH_PUBKEY` | empty | Optional public key. If set, SSH becomes key-only |
 | `TIMEZONE` | `UTC` | Any `timedatectl list-timezones` value |
 
@@ -102,7 +103,7 @@ sysctl changes).
 | sudo | `NEW_USER` gets **passwordless** sudo (`NOPASSWD: ALL`). Step 4 relies on this. The repo README shows how to require a password instead |
 | Firewall in | Everything denied, **except** your `SSH_ALLOWED_IPS`, which may reach SSH and every other port |
 | Firewall out | Everything denied, **except** DNS (53), HTTP (80), HTTPS (443), NTP (123/udp), SMTP (25, 587) and replies to your allowed IPs |
-| fail2ban | Jails `sshd`, `recidive` and `portscan` (the bot in step 4 reads these) |
+| fail2ban | Jails `sshd`, `recidive` (banned 3 times in 24 h = all ports blocked for a year) and `portscan` (only packets the firewall blocked count; allowed traffic never does). The bot in step 4 reads these |
 | IPv6 | Disabled |
 | Logs | `/var/log/hardening_script.log` (full run log), UFW logging on |
 
@@ -139,12 +140,24 @@ git clone https://github.com/sheloab/hardening-nginx-script.git
 cd hardening-nginx-script
 cp hardening_nginx.conf.example hardening_nginx.conf
 nano hardening_nginx.conf          # at least set DOMAIN=
-sudo ./hardening_nginx_v4.sh hardening_nginx.conf
+sudo ./hardening_nginx_v5.sh hardening_nginx.conf
 ```
 
 It installs nginx if it is missing, backs up the current config to
 `/etc/nginx/backups/<timestamp>/`, writes `conf.d/security-headers.conf` and
 `conf.d/hardening.conf`, and rolls everything back if `nginx -t` fails.
+
+It also sets up the **bot & scanner blocker** (on by default): scanners,
+scripts, empty user agents and AI crawlers get no answer (444), and fail2ban
+jails `nginx-bot` and `nginx-probe` ban them. Bans are enforced inside nginx,
+so they also work behind Cloudflare. Settings to look at in
+`hardening_nginx.conf`:
+
+- `BEHIND_CLOUDFLARE=yes` if the site is proxied by Cloudflare (real visitor IP,
+  Cloudflare's own addresses are never banned).
+- `BAN_IGNORE_IPS` - addresses never blocked or banned (empty = nobody).
+- A site is protected once its `server{}` block has
+  `include /etc/nginx/snippets/bot-response.conf;` (or set `BOT_AUTO_INCLUDE=yes`).
 
 ### Get a certificate
 
@@ -187,7 +200,9 @@ sudo bash install_xfce_xrdp.sh
 ```
 
 It installs XFCE, LightDM and xrdp, sets the server to boot into graphical
-mode, and starts xrdp on port **3389**. It is safe to re-run.
+mode, and starts xrdp on port **3389**. It also installs an xrdp reconnect hook
+that restarts the clipboard helper if it has died, so copy/paste keeps working
+after you reconnect. It is safe to re-run.
 
 ### Connecting
 
